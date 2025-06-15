@@ -148,6 +148,70 @@ app.get('/demo', async (req, res) => {
     // Chèn <base> để các đường dẫn tương đối được load theo domain gốc
     html = html.replace(/<head>/i, `<head><base href="${target}">`);
 
+    // Remove các thẻ script không cần thiết
+    html = html.replace(/<script[^>]*src="https:\/\/www\.google-analytics\.com[^"]*"[^>]*><\/script>/gi, '');
+    html = html.replace(/<script[^>]*src="https:\/\/www\.googletagmanager\.com[^"]*"[^>]*><\/script>/gi, '');
+    html = html.replace(/https:\/\/www\.google-analytics\.com\/[^\s'"]+/gi, '');
+    html = html.replace(/https:\/\/www\.googletagmanager\.com\/[^\s'"]+/gi, '');
+    html = html.replace(/https:\/\/www\.google-analytics\.com\/[^\s"'<>]+/gi, '');
+    html = html.replace(/https:\/\/www\.googletagmanager\.com\/[^\s"'<>]+/gi, '');
+    
+    // Chặn Google Analytics và Google Tag Manager
+   const blockTrackingScripts = `
+    <script>
+      (function() {
+        const blockedHosts = [
+          'www.google-analytics.com',
+          'www.googletagmanager.com',
+          'google-analytics.com',
+          'googletagmanager.com',
+          'www.googleadservices.com',
+          'connect.facebook.net',
+          'static.hotjar.com',
+          'cdn.segment.com',
+          'bam.nr-data.net',
+          'sentry.io'
+        ];
+
+        function isBlocked(url) {
+          return blockedHosts.some(domain => url.includes(domain));
+        }
+
+        // Chặn fetch
+        const originalFetch = window.fetch;
+        window.fetch = function(resource, init) {
+          const url = typeof resource === 'string' ? resource : resource.url;
+          if (isBlocked(url)) {
+            console.warn('[BLOCKED fetch]', url);
+            return new Promise(() => {}); // never resolve
+          }
+          return originalFetch(resource, init);
+        };
+
+        // Chặn XMLHttpRequest
+        const originalXHRopen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          if (isBlocked(url)) {
+            console.warn('[BLOCKED XHR]', url);
+            this.abort();
+            return;
+          }
+          return originalXHRopen.apply(this, arguments);
+        };
+
+        // Chặn sendBeacon (rất hay dùng cho tracking)
+        const originalSendBeacon = navigator.sendBeacon;
+        navigator.sendBeacon = function(url, data) {
+          if (isBlocked(url)) {
+            console.warn('[BLOCKED Beacon]', url);
+            return false;
+          }
+          return originalSendBeacon.apply(this, arguments);
+        };
+      })();
+    </script>
+    `;
+
     // Chèn script phục hồi localStorage và override fetch/XHR
     if (localStore) {
       const lsScript = `
@@ -181,19 +245,139 @@ app.get('/demo', async (req, res) => {
       html = html.replace(/<\/body>/i, lsScript + '</body>');
     }
 
+    // Xóa phần header chứa thông tin người dùng
+    html = html.replace(/<header[^>]*id=["']srf-header["'][\s\S]*?<\/header>/i, '')   
+
     // Rewrite các liên kết tuyệt đối từ semrush.com sang /proxy
     html = html.replace(/(src|href)="https:\/\/www\.semrush\.com/gi, '$1="/proxy');
     // Rewrite các liên kết tương đối cho các tài nguyên tĩnh (có đuôi file)
-    html = html.replace(/(href|src)="\/(?!proxy)([^"]+\.(js|css|png|jpe?g|gif|svg|webp|png|ico))"/gi, (match, attr, path) => {
+    html = html.replace(/(href|src|action|data-url|data-href|data-api-url)="\/(?!proxy)([^"]+\.(js|css|png|jpe?g|gif|svg|webp|png|ico))"/gi, (match, attr, path) => {
       return `${attr}="/proxy/${path}"`;
     });
+
+    // Rewrite tất cả mọi thứ trong js và cả html
+    html = html.replace(/(["'])\/(?!proxy)([^"']+\.(js|css|png|jpe?g|gif|svg|webp|ico))\1/gi, (match, quote, path) => {
+      return `${quote}/proxy/${path}${quote}`;
+    });
+
+    // Rewrite các a tag
+    html = html.replace(/<a\b[^>]*?href="\/(?!proxy)([^"]*)"/gi, (match, path) => {
+      const baseOrigin = new URL(target).origin;
+      const fullUrl = new URL('/' + path, baseOrigin).toString();
+      return match.replace(/href="\/[^"]*"/, `href="/demo?url=${encodeURIComponent(fullUrl)}"`);
+    });
+
     // Rewrite các liên kết còn lại (thường là các trang HTML)
     // Chỉ rewrite nếu URL không kết thúc bằng định dạng file tĩnh
-    html = html.replace(/(href|src)="\/(?!proxy)([^"]*)"/gi, (match, attr, path) => {
-      if (/\.(js|css|png|jpe?g|gif|svg|webp|png|ico)$/.test(path)) return match;
-      const newUrl = target.replace(/\/+$/, '') + '/' + path;
-      return `${attr}="/demo?url=${encodeURIComponent(newUrl)}"`;
+    // Bỏ qua thẻ <a> để tránh rewrite các liên kết không cần thiết
+    html = html.replace(/<(?!a\b)[^>]*\b(href|src)="\/(?!proxy)([^"]*)"/gi, (match, attr, path) => {
+      if (/\.(js|css|png|jpe?g|gif|svg|webp|ico)$/.test(path)) return match;
+      const baseOrigin = new URL(target).origin;
+      const newUrl = new URL('/' + path, baseOrigin).toString();
+      return match.replace(
+        new RegExp(`${attr}="\\/[^"]*"`),
+        `${attr}="/demo?url=${encodeURIComponent(newUrl)}"`
+      );
     });
+
+    // Chèn script chặn quảng cáo
+    const adBlockerScript = `
+    <script>
+    (function() {
+      const blockedDomains = [
+        "doubleclick.net",
+        "googleadservices.com",
+        "googlesyndication.com",
+        "adsafeprotected.com",
+        "adsrvr.org",
+        "adnxs.com",
+        "criteo.com",
+        "facebook.net",
+        "fledge",
+        "googletagmanager.com",
+        "google-analytics.com",
+        "scorecardresearch.com",
+        "chartbeat.com",
+        "taboola.com",
+        "outbrain.com"
+      ];
+
+      function isAdUrl(url) {
+        return blockedDomains.some(domain => url.includes(domain));
+      }
+
+      // Chặn fetch
+      const origFetch = window.fetch;
+      window.fetch = function(resource, init) {
+        const url = typeof resource === 'string' ? resource : (resource.url || '');
+        if (isAdUrl(url)) {
+          console.warn('[AdBlock] fetch blocked:', url);
+          return new Promise(() => {});
+        }
+        return origFetch.apply(this, arguments);
+      };
+
+      // Chặn XMLHttpRequest
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(method, url) {
+        if (isAdUrl(url)) {
+          console.warn('[AdBlock] XHR blocked:', url);
+          return this.abort();
+        }
+        return origOpen.apply(this, arguments);
+      };
+
+      // Chặn navigator APIs liên quan đến quảng cáo
+      navigator.joinAdInterestGroup = () => console.warn('[AdBlock] joinAdInterestGroup blocked');
+      navigator.runAdAuction = () => console.warn('[AdBlock] runAdAuction blocked');
+      navigator.enableAdAuction = () => console.warn('[AdBlock] enableAdAuction blocked');
+    })();
+    </script>
+    `;
+
+    //  Chèn script replace các thẻ script có src bắt đầu bằng /__static__/ thành /proxy/__static__/
+    const patchScript = `
+      <script>
+      (function () {
+        const originalCreateElement = document.createElement;
+
+        document.createElement = function (tagName) {
+          const el = originalCreateElement.call(document, tagName);
+
+          if (tagName.toLowerCase() === 'script') {
+            const originalSetAttribute = el.setAttribute;
+
+            el.setAttribute = function (name, value) {
+              if (name === 'src' && value.startsWith('/__static__/')) {
+                console.warn('[REWRITE setAttribute] src → /proxy' + value);
+                value = '/proxy' + value;
+              }
+              return originalSetAttribute.call(this, name, value);
+            };
+
+            Object.defineProperty(el, 'src', {
+              set(value) {
+                if (value.startsWith('/__static__/')) {
+                  console.warn('[REWRITE .src] → /proxy' + value);
+                  value = '/proxy' + value;
+                }
+                el.setAttribute('src', value);
+              },
+              get() {
+                return el.getAttribute('src');
+              },
+              configurable: true
+            });
+          }
+
+          return el;
+        };
+      })();
+      </script>
+      `;
+
+    html = html.replace(/<\/body>/i, patchScript + blockTrackingScripts  + adBlockerScript + '</body>');
+
     res.set('Content-Type', 'text/html');
     res.send(html);
   } catch (err) {
@@ -209,6 +393,19 @@ app.use('/proxy', createProxyMiddleware({
     proxyRes.headers['Access-Control-Allow-Origin'] = '*';
   }
 }));
+
+// Middleware để F5 tự động chuyển hướng đến serumsh.com
+app.use((req, res, next) => {
+  const isStatic = /\.(js|css|png|jpg|jpeg|gif|svg|ico|webp)$/i.test(req.path);
+  const isHandled = req.path.startsWith('/proxy') || req.path.startsWith('/load') || req.path.startsWith('/demo');
+
+  if (!isStatic && !isHandled) {
+    const originalUrl = 'https://www.semrush.com' + req.path;
+    return res.redirect('/demo?url=' + encodeURIComponent(originalUrl));
+  }
+
+  next();
+});
 
 // Start server
 const PORT = process.env.PORT || 3000;
