@@ -1,12 +1,14 @@
 {
   "name": "login-injector",
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js"
   },
   "dependencies": {
     "express": "^5.0.2",
+    "node-cache": "^5.1.2",
     "playwright": "^1.44.0"
   },
   "devDependencies": {
